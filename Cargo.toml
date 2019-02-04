@@ -1,0 +1,10 @@
+[package]
+name = "atomiqueue"
+version = "0.1.0"
+authors = ["Andrew Tolvstad <tolvstaa@lifetime.oregonstate.edu>"]
+edition = "2018"
+
+[dev-dependencies]
+rand = "0.6"
+
+[dependencies]
