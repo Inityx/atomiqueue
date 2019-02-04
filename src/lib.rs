@@ -15,7 +15,7 @@ pub const SIZE: usize = 16;
 /// Fixed-size queue with atomic operations
 ///
 /// Designed for message passing in embedded interrupt service handlers.
-pub struct AtomiQueue<T>  {
+pub struct AtomiQueue<T: Send>  {
     start: Cell<usize>,
     end: Cell<usize>,
     size: AtomicUsize,
@@ -24,9 +24,9 @@ pub struct AtomiQueue<T>  {
     pop_pending: AtomicBool,
 }
 
-unsafe impl<T> Sync for AtomiQueue<T> {}
+unsafe impl<T: Send> Sync for AtomiQueue<T> {}
 
-impl<T> Drop for AtomiQueue<T> {
+impl<T: Send> Drop for AtomiQueue<T> {
     fn drop(&mut self) {
         if needs_drop::<T>() == false { return; }
 
@@ -38,7 +38,7 @@ impl<T> Drop for AtomiQueue<T> {
     }
 }
 
-impl<T> AtomiQueue<T> {
+impl<T: Send> AtomiQueue<T> {
     /// Creates a new, empty AtomiQueue
     pub const fn new() -> Self {
         AtomiQueue {
@@ -78,7 +78,7 @@ impl<T> AtomiQueue<T> {
 
     /// Pop a value off the queue
     ///
-    /// Returns `Err(())` if there's already a pop happening
+    /// Returns `Err(())` if there's already a peek or pop happening
     /// somewhere else, and `Ok(None)` if the queue is empty.
     pub fn pop(&self) -> Result<Option<T>, ()> {
         if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
@@ -138,6 +138,32 @@ impl<T> AtomiQueue<T> {
     }
 }
 
+impl<T: Send + Clone> AtomiQueue<T> {
+    /// Clone the top value off the queue
+    ///
+    /// Returns `Err(())` if there's already a peek or pop happening
+    /// somewhere else, and `Ok(None)` if the queue is empty.
+    pub fn peek(&self) -> Result<Option<T>, ()> {
+        if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
+            return Err(());
+        }
+
+        if self.size.load(Ordering::Acquire) == 0 {
+            self.pop_pending.store(false, Ordering::Release);
+            return Ok(None);
+        }
+
+        let value = unsafe { self.element_at(self.start.get()).as_ref().unwrap() }.clone();
+
+        // don't inc_start
+        // don't size.fetch_sub(1)
+
+        self.pop_pending.store(false, Ordering::Release);
+
+        Ok(Some(value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +173,7 @@ mod tests {
         let queue = AtomiQueue::<i32>::new();
         assert_eq!(Ok(None), queue.pop());
         assert_eq!(Ok(()), queue.push(1));
+        assert_eq!(Ok(Some(1)), queue.peek());
         assert_eq!(Ok(Some(1)), queue.pop());
     }
 
@@ -158,8 +185,11 @@ mod tests {
             &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
             unsafe { queue.storage.get().as_ref().unwrap().get_ref() },
         );
+        assert_eq!(Ok(Some(0)), queue.peek());
         assert_eq!(Ok(Some(0)), queue.pop());
+        assert_eq!(Ok(Some(1)), queue.peek());
         assert_eq!(Ok(Some(1)), queue.pop());
+        assert_eq!(Ok(Some(2)), queue.peek());
         assert_eq!(Ok(Some(2)), queue.pop());
     }
 
