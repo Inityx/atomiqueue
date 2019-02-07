@@ -10,12 +10,13 @@ use core::{
 #[derive(Debug, PartialEq)]
 pub enum PushError { Full, Pending }
 
+/// The size of the queue
 pub const SIZE: usize = 16;
 
-/// Fixed-size queue with atomic operations
+/// Fixed-size queue with atomic operations.
 ///
 /// Designed for message passing in embedded interrupt service handlers.
-pub struct AtomiQueue<T: Send>  {
+pub struct AtomiQueue<T>  {
     start: Cell<usize>,
     end: Cell<usize>,
     size: AtomicUsize,
@@ -24,22 +25,30 @@ pub struct AtomiQueue<T: Send>  {
     pop_pending: AtomicBool,
 }
 
-unsafe impl<T: Send> Sync for AtomiQueue<T> {}
+unsafe impl<T> Sync for AtomiQueue<T> where T: Send {}
 
-impl<T: Send> Drop for AtomiQueue<T> {
+impl<T> Drop for AtomiQueue<T> {
     fn drop(&mut self) {
-        if needs_drop::<T>() == false { return; }
+        if !needs_drop::<T>() { return; }
 
         // No need to be atomic because a dropped
         // AtomiQueue can have no references
-        while let Ok(Some(value)) = self.pop() {
-            drop(value);
+        let mut size = self.len();
+
+        while size > 0 {
+            drop(unsafe { self.element_at(self.start.get()).read() });
+            self.inc_start();
+            size -= 1;
         }
     }
 }
 
-impl<T: Send> AtomiQueue<T> {
-    /// Creates a new, empty AtomiQueue
+impl<T> Default for AtomiQueue<T> {
+    fn default() -> Self { AtomiQueue::new() }
+}
+
+impl<T> AtomiQueue<T> {
+    /// Creates a new, empty queue.
     pub const fn new() -> Self {
         AtomiQueue {
             start: Cell::new(0),
@@ -51,11 +60,11 @@ impl<T: Send> AtomiQueue<T> {
         }
     }
 
-    /// Push a value onto the queue
+    /// Tries to push a value onto the queue.
     ///
-    /// Returns `Err((PushError::Pending, T))` if there's already a
-    /// push happening somewhere else, and `Err((PushError::Full, T))`
-    /// if the queue is full.
+    /// This operation will return `Err` if there's already a
+    /// `push` happening somewhere else on the same queue, or the queue is
+    /// full; `Err` also returns the failed value.
     pub fn push(&self, value: T) -> Result<(), (PushError, T)> {
         if self.push_pending.compare_and_swap(false, true, Ordering::Acquire) {
             return Err((PushError::Pending, value));
@@ -76,10 +85,11 @@ impl<T: Send> AtomiQueue<T> {
         Ok(())
     }
 
-    /// Pop a value off the queue
+    /// Pops a value off the queue.
     ///
-    /// Returns `Err(())` if there's already a peek or pop happening
-    /// somewhere else, and `Ok(None)` if the queue is empty.
+    /// This operation will return `Err` if there's already a
+    /// [`peek`](AtomiQueue::peek) or `pop` happening
+    /// somewhere else on the same queue.
     pub fn pop(&self) -> Result<Option<T>, ()> {
         if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
             return Err(());
@@ -100,50 +110,12 @@ impl<T: Send> AtomiQueue<T> {
         Ok(Some(value))
     }
 
-    unsafe fn element_at(&self, index: usize) -> *mut T {
-        let storage: *mut MaybeUninit<_> = self.storage.get();
-        let storage: &mut MaybeUninit<_> = storage.as_mut().unwrap();
-        let elem_ptr = storage.as_mut_ptr() as *mut T;
-        elem_ptr.add(index)
-    }
-
-    fn inc_start(&self) {
-        self.start.update(|start|(start + 1) % SIZE);
-    }
-
-    fn inc_end(&self) {
-        self.end.update(|end| (end + 1) % SIZE);
-    }
-
-    /// Extend queue with the contents of an iterable.
+    /// Clones the top value off the queue.
     ///
-    /// Move all items from `iter` into the queue, retrying based
-    /// on `retry` when pushing results in an error. If `retry`
-    /// returns `false`, the value that failed to push is dropped.
-    ///
-    /// `retry` can also be used to implement strategies like
-    /// exponential backoff using delay/sleep.
-    pub fn extend(
-        &self,
-        iter: impl IntoIterator<Item=T>,
-        mut retry: impl FnMut(PushError) -> bool,
-    ) {
-        for value in iter {
-            let mut value = Some(value);
-            while let Err((e, value_again)) = self.push(value.take().unwrap()) {
-                if !retry(e) { break; }
-                value = Some(value_again);
-            }
-        }
-    }
-}
-
-impl<T: Send + Clone> AtomiQueue<T> {
-    /// Clone the top value off the queue
-    ///
-    /// Returns `Err(())` if there's already a peek or pop happening
-    /// somewhere else, and `Ok(None)` if the queue is empty.
-    pub fn peek(&self) -> Result<Option<T>, ()> {
+    /// This operation returns `Err` if there's already a `peek` or
+    /// [`pop`](AtomiQueue::pop) happening somewhere else on the same queue.
+    pub fn peek(&self) -> Result<Option<T>, ()>
+    where T: Clone {
         if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
             return Err(());
         }
@@ -153,7 +125,9 @@ impl<T: Send + Clone> AtomiQueue<T> {
             return Ok(None);
         }
 
-        let value = unsafe { self.element_at(self.start.get()).as_ref().unwrap() }.clone();
+        let value = unsafe {
+            self.element_at(self.start.get()).as_ref().unwrap()
+        }.clone();
 
         // don't inc_start
         // don't size.fetch_sub(1)
@@ -161,6 +135,54 @@ impl<T: Send + Clone> AtomiQueue<T> {
         self.pop_pending.store(false, Ordering::Release);
 
         Ok(Some(value))
+    }
+
+    unsafe fn element_at(&self, index: usize) -> *mut T {
+        let storage: *mut MaybeUninit<_> = self.storage.get();
+        let storage: &mut MaybeUninit<_> = storage.as_mut().unwrap();
+        let elem_ptr = storage.as_mut_ptr() as *mut T;
+        elem_ptr.add(index)
+    }
+
+    fn inc_start(&self) {
+        self.start.update(|start| (start + 1) % SIZE);
+    }
+
+    fn inc_end(&self) {
+        self.end.update(|end| (end + 1) % SIZE);
+    }
+
+    /// Gets the number of elements currently in the queue.
+    ///
+    /// A concurrent [`push`](AtomiQueue::push) or [`pop`](AtomiQueue::pop)
+    /// will not be counted in the size until it has completed.
+    pub fn len(&self) -> usize {
+        self.size.load(Ordering::Relaxed)
+    }
+
+    /// Extends queue with the contents of an iterable.
+    ///
+    /// This operation [`push`](AtomiQueue::push)es all items from `iter`
+    /// into the queue. If pushing fails, `retry` is called with the [`PushError`]
+    /// and the failed value. Returning `Some(value)` attempts to push the
+    /// returned value, and returning `None` moves on to the next value in `iter`.
+    ///
+    /// The `retry` functor can be used to implement strategies like exponential
+    /// backoff by sleeping, or realtime prioritization by filtering.
+    pub fn extend(
+        &self,
+        iter: impl IntoIterator<Item=T>,
+        mut retry: impl FnMut(PushError, T) -> Option<T>,
+    ) {
+        for value in iter {
+            let mut maybe_value = Some(value);
+
+            while let Some(to_push) = maybe_value.take() {
+                if let Err((e, failed)) = self.push(to_push) {
+                    maybe_value = retry(e, failed);
+                }
+            }
+        }
     }
 }
 
@@ -180,25 +202,25 @@ mod tests {
     #[test]
     fn fill() {
         let queue = AtomiQueue::<i32>::new();
-        queue.extend((0..).take(SIZE), |_| false);
+        queue.extend((0..).take(SIZE), |_, _| None);
+
         assert_eq!(
             &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
             unsafe { queue.storage.get().as_ref().unwrap().get_ref() },
         );
+        assert_eq!(Err((PushError::Full, 1)), queue.push(1));
         assert_eq!(Ok(Some(0)), queue.peek());
         assert_eq!(Ok(Some(0)), queue.pop());
         assert_eq!(Ok(Some(1)), queue.peek());
         assert_eq!(Ok(Some(1)), queue.pop());
         assert_eq!(Ok(Some(2)), queue.peek());
         assert_eq!(Ok(Some(2)), queue.pop());
-    }
 
-    #[test]
-    fn overfill() {
-        let queue = AtomiQueue::<i32>::new();
-        queue.extend((0..).take(SIZE), |_| false);
-        assert_eq!(Err((PushError::Full, 1)), queue.push(1));
-        assert_eq!(Ok(Some(0)), queue.pop());
-        assert!(queue.push(1).is_ok());
+        while let Ok(Some(x)) = queue.pop() { core::mem::drop(x); }
+
+        queue.push(123).unwrap();
+        queue.push(234).unwrap();
+        assert_eq!(Ok(Some(123)), queue.pop());
+        assert_eq!(Ok(Some(234)), queue.pop());
     }
 }
