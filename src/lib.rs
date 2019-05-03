@@ -110,7 +110,7 @@ impl<T> AtomiQueue<T> {
         Ok(Some(value))
     }
 
-    /// Clones the top value off the front of the queue.
+    /// Clones the oldest value in the queue
     ///
     /// This operation returns `Err` if there's already a 
     /// `front`, [`back`](AtomiQueue::back), or [`pop`](AtomiQueue::pop)
@@ -138,7 +138,7 @@ impl<T> AtomiQueue<T> {
         Ok(Some(value))
     }
 
-    /// Clones the top value off the back end of the queue.
+    /// Clones the most recently pushed value in the queue.
     ///
     /// This operation returns `Err` if there's already a
     /// [`front`](AtomiQueue::front), `back`, or [`pop`](AtomiQueue::pop)
@@ -155,10 +155,9 @@ impl<T> AtomiQueue<T> {
         }
 
         let value = unsafe {
-            if self.size.load(Ordering::Acquire) == 0 {
+            if self.end.get() == 0 {
                 self.element_at(SIZE - 1).as_ref().unwrap()
-            }
-            else {
+            } else {
                 self.element_at(self.end.get() - 1).as_ref().unwrap()
             }
         }.clone();
