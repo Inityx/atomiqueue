@@ -88,7 +88,7 @@ impl<T> AtomiQueue<T> {
     /// Pops a value off the queue.
     ///
     /// This operation will return `Err` if there's already a
-    /// [`peek`](AtomiQueue::peek) or `pop` happening
+    /// [`front`](AtomiQueue::front), ['back'](AtomiQueue::back) or `pop` happening
     /// somewhere else on the same queue.
     pub fn pop(&self) -> Result<Option<T>, ()> {
         if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
@@ -110,11 +110,12 @@ impl<T> AtomiQueue<T> {
         Ok(Some(value))
     }
 
-    /// Clones the top value off the queue.
+    /// Clones the oldest value in the queue
     ///
-    /// This operation returns `Err` if there's already a `peek` or
-    /// [`pop`](AtomiQueue::pop) happening somewhere else on the same queue.
-    pub fn peek(&self) -> Result<Option<T>, ()>
+    /// This operation returns `Err` if there's already a 
+    /// `front`, [`back`](AtomiQueue::back), or [`pop`](AtomiQueue::pop)
+    /// happening somewhere else on the same queue.
+    pub fn front(&self) -> Result<Option<T>, ()>
     where T: Clone {
         if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
             return Err(());
@@ -131,6 +132,35 @@ impl<T> AtomiQueue<T> {
 
         // don't inc_start
         // don't size.fetch_sub(1)
+
+        self.pop_pending.store(false, Ordering::Release);
+
+        Ok(Some(value))
+    }
+
+    /// Clones the most recently pushed value in the queue.
+    ///
+    /// This operation returns `Err` if there's already a
+    /// [`front`](AtomiQueue::front), `back`, or [`pop`](AtomiQueue::pop)
+    /// happening somewhere else on the same queue.
+    pub fn back(&self) -> Result<Option<T>, ()>
+    where T: Clone {
+        if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
+            return Err(());
+        }
+
+        if self.size.load(Ordering::Acquire) == 0 {
+            self.pop_pending.store(false, Ordering::Release);
+            return Ok(None);
+        }
+
+        let value = unsafe {
+            if self.end.get() == 0 {
+                self.element_at(SIZE - 1).as_ref().unwrap()
+            } else {
+                self.element_at(self.end.get() - 1).as_ref().unwrap()
+            }
+        }.clone();
 
         self.pop_pending.store(false, Ordering::Release);
 
@@ -195,7 +225,8 @@ mod tests {
         let queue = AtomiQueue::<i32>::new();
         assert_eq!(Ok(None), queue.pop());
         assert_eq!(Ok(()), queue.push(1));
-        assert_eq!(Ok(Some(1)), queue.peek());
+        assert_eq!(Ok(Some(1)), queue.front());
+        assert_eq!(Ok(Some(1)), queue.back());
         assert_eq!(Ok(Some(1)), queue.pop());
     }
 
@@ -209,11 +240,11 @@ mod tests {
             unsafe { queue.storage.get().as_ref().unwrap().get_ref() },
         );
         assert_eq!(Err((PushError::Full, 1)), queue.push(1));
-        assert_eq!(Ok(Some(0)), queue.peek());
+        assert_eq!(Ok(Some(0)), queue.front());
         assert_eq!(Ok(Some(0)), queue.pop());
-        assert_eq!(Ok(Some(1)), queue.peek());
+        assert_eq!(Ok(Some(1)), queue.front());
         assert_eq!(Ok(Some(1)), queue.pop());
-        assert_eq!(Ok(Some(2)), queue.peek());
+        assert_eq!(Ok(Some(2)), queue.front());
         assert_eq!(Ok(Some(2)), queue.pop());
 
         while let Ok(Some(x)) = queue.pop() { core::mem::drop(x); }
@@ -222,5 +253,23 @@ mod tests {
         queue.push(234).unwrap();
         assert_eq!(Ok(Some(123)), queue.pop());
         assert_eq!(Ok(Some(234)), queue.pop());
+    }
+
+    #[test]
+    fn peeks() {
+        let queue = AtomiQueue::<i32>::new();
+        assert_eq!(Ok(None), queue.pop());
+        assert_eq!(Ok(()), queue.push(1));
+        assert_eq!(Ok(Some(1)), queue.front());
+        assert_eq!(Ok(Some(1)), queue.back());
+        assert_eq!(Ok(()), queue.push(2));
+        assert_eq!(Ok(Some(1)), queue.front());
+        assert_eq!(Ok(Some(2)), queue.back());
+        assert_eq!(Ok(()), queue.push(3));
+        assert_eq!(Ok(Some(1)), queue.front());
+        assert_eq!(Ok(Some(3)), queue.back());
+        assert_eq!(Ok(Some(1)), queue.pop());
+        assert_eq!(Ok(Some(2)), queue.front());
+        assert_eq!(Ok(Some(3)), queue.back());
     }
 }

@@ -81,8 +81,8 @@ fn correct_drop() {
     assert_eq!((SIZE + 1, 3), tracker.created_deleted());
 
     // peek and drop 2
-    drop(queue.peek().expect("Should be only one peeker").expect("Shouldn't be empty"));
-    drop(queue.peek().expect("Should be only one peeker").expect("Shouldn't be empty"));
+    drop(queue.front().expect("Should be only one peeker").expect("Shouldn't be empty"));
+    drop(queue.back().expect("Should be only one peeker").expect("Shouldn't be empty"));
     assert_eq!((SIZE + 3, 5), tracker.created_deleted());
 
     // drop all
