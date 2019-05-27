@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(cell_update, const_fn, maybe_uninit)]
+#![feature(cell_update, const_fn, maybe_uninit, maybe_uninit_ref)]
 
 use core::{
     cell::{Cell, UnsafeCell},
@@ -54,7 +54,7 @@ impl<T> AtomiQueue<T> {
             start: Cell::new(0),
             end: Cell::new(0),
             size: AtomicUsize::new(0),
-            storage: UnsafeCell::new(MaybeUninit::uninitialized()),
+            storage: UnsafeCell::new(MaybeUninit::uninit()),
             push_pending: AtomicBool::new(false),
             pop_pending: AtomicBool::new(false),
         }
