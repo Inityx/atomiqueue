@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(cell_update, const_fn, maybe_uninit, maybe_uninit_ref)]
+#![feature(cell_update, const_fn, maybe_uninit_ref)]
 
 use core::{
     cell::{Cell, UnsafeCell},
@@ -44,13 +44,13 @@ impl<T> Drop for AtomiQueue<T> {
 }
 
 impl<T> Default for AtomiQueue<T> {
-    fn default() -> Self { AtomiQueue::new() }
+    fn default() -> Self { Self::new() }
 }
 
 impl<T> AtomiQueue<T> {
     /// Creates a new, empty queue.
     pub const fn new() -> Self {
-        AtomiQueue {
+        Self {
             start: Cell::new(0),
             end: Cell::new(0),
             size: AtomicUsize::new(0),
@@ -112,7 +112,7 @@ impl<T> AtomiQueue<T> {
 
     /// Clones the oldest value in the queue
     ///
-    /// This operation returns `Err` if there's already a 
+    /// This operation returns `Err` if there's already a
     /// `front`, [`back`](AtomiQueue::back), or [`pop`](AtomiQueue::pop)
     /// happening somewhere else on the same queue.
     pub fn front(&self) -> Result<Option<T>, ()>
