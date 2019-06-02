@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(cell_update, const_fn, maybe_uninit_ref)]
+#![feature(cell_update, const_fn, const_generics, maybe_uninit_ref)]
 
 use core::{
     cell::{Cell, UnsafeCell},
@@ -10,13 +10,10 @@ use core::{
 #[derive(Debug, PartialEq)]
 pub enum PushError { Full, Pending }
 
-/// The size of the queue
-pub const SIZE: usize = 16;
-
 /// Fixed-size queue with atomic operations.
 ///
 /// Designed for message passing in embedded interrupt service handlers.
-pub struct AtomiQueue<T>  {
+pub struct AtomiQueue<T, const SIZE: usize>  {
     start: Cell<usize>,
     end: Cell<usize>,
     size: AtomicUsize,
@@ -25,9 +22,9 @@ pub struct AtomiQueue<T>  {
     pop_pending: AtomicBool,
 }
 
-unsafe impl<T> Sync for AtomiQueue<T> where T: Send {}
+unsafe impl<T, const SIZE: usize> Sync for AtomiQueue<T, {SIZE}> where T: Send {}
 
-impl<T> Drop for AtomiQueue<T> {
+impl<T, const SIZE: usize> Drop for AtomiQueue<T, {SIZE}> {
     fn drop(&mut self) {
         if !needs_drop::<T>() { return; }
 
@@ -43,11 +40,11 @@ impl<T> Drop for AtomiQueue<T> {
     }
 }
 
-impl<T> Default for AtomiQueue<T> {
+impl<T, const SIZE: usize> Default for AtomiQueue<T, {SIZE}> {
     fn default() -> Self { Self::new() }
 }
 
-impl<T> AtomiQueue<T> {
+impl<T, const SIZE: usize> AtomiQueue<T, {SIZE}> {
     /// Creates a new, empty queue.
     pub const fn new() -> Self {
         Self {
@@ -222,7 +219,7 @@ mod tests {
 
     #[test]
     fn new() {
-        let queue = AtomiQueue::<i32>::new();
+        let queue = AtomiQueue::<i32, 16>::new();
         assert_eq!(Ok(None), queue.pop());
         assert_eq!(Ok(()), queue.push(1));
         assert_eq!(Ok(Some(1)), queue.front());
@@ -232,8 +229,8 @@ mod tests {
 
     #[test]
     fn fill() {
-        let queue = AtomiQueue::<i32>::new();
-        queue.extend((0..).take(SIZE), |_, _| None);
+        let queue = AtomiQueue::<i32, 16>::new();
+        queue.extend((0..).take(16), |_, _| None);
 
         assert_eq!(
             &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
@@ -257,7 +254,7 @@ mod tests {
 
     #[test]
     fn peeks() {
-        let queue = AtomiQueue::<i32>::new();
+        let queue = AtomiQueue::<i32, 16>::new();
         assert_eq!(Ok(None), queue.pop());
         assert_eq!(Ok(()), queue.push(1));
         assert_eq!(Ok(Some(1)), queue.front());

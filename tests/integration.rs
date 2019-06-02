@@ -10,6 +10,7 @@ use std::{
 };
 use rand::random;
 
+const SIZE: usize = 16;
 fn random_sleep(mult: u64) {
     sleep(Duration::from_micros(
         (random::<u64>() % 1024) * mult
@@ -18,24 +19,24 @@ fn random_sleep(mult: u64) {
 
 #[test]
 fn parallel_fuzz() {
-    static QUEUE: AtomiQueue<i32> = AtomiQueue::<i32>::new();
+    static QUEUE: AtomiQueue<i32, SIZE> = AtomiQueue::<i32, SIZE>::new();
 
     for _ in 0..50 {
         let prod_a = thread::spawn(move ||
             QUEUE.extend(
-                (0..32).map(|x| { random_sleep(1); x }),
+                (0..(SIZE*2)).map(|x| { random_sleep(1); x }),
                 |_, x| { random_sleep(1); Some(x) },
             )
         );
 
         let prod_b = thread::spawn(move ||
             QUEUE.extend(
-                (32..64).map(|x| { random_sleep(1); x }),
+                ((SIZE*2)..(SIZE*4)).map(|x| { random_sleep(1); x }),
                 |_, x| { random_sleep(1); Some(x) },
             )
         );
 
-        let mut vec = (0..64)
+        let mut vec = (0..(SIZE*4))
             .map(|_| loop {
                 random_sleep(3);
                 if let Ok(Some(value)) = QUEUE.pop() { break value; }
@@ -53,7 +54,6 @@ fn parallel_fuzz() {
 
 #[test]
 fn correct_drop() {
-    use atomiqueue::SIZE;
     let tracker = tracker::Tracker::new();
 
     // init
