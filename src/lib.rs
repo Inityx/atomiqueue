@@ -1,35 +1,36 @@
 #![no_std]
 #![feature(cell_update, const_fn, maybe_uninit)]
 
+mod array;
+
 use core::{
     cell::{Cell, UnsafeCell},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     mem::{MaybeUninit, needs_drop},
 };
 
+use array::Array;
+
 #[derive(Debug, PartialEq)]
 pub enum PushError { Full, Pending }
-
-/// The size of the queue
-pub const SIZE: usize = 16;
 
 /// Fixed-size queue with atomic operations.
 ///
 /// Designed for message passing in embedded interrupt service handlers.
-pub struct AtomiQueue<T>  {
+pub struct AtomiQueue<A: Array>  {
     start: Cell<usize>,
     end: Cell<usize>,
     size: AtomicUsize,
-    storage: UnsafeCell<MaybeUninit<[T; SIZE]>>,
+    storage: UnsafeCell<MaybeUninit<A>>,
     push_pending: AtomicBool,
     pop_pending: AtomicBool,
 }
 
-unsafe impl<T> Sync for AtomiQueue<T> where T: Send {}
+unsafe impl<A> Sync for AtomiQueue<A> where A: Array, A::T: Send {}
 
-impl<T> Drop for AtomiQueue<T> {
+impl<A: Array> Drop for AtomiQueue<A> {
     fn drop(&mut self) {
-        if !needs_drop::<T>() { return; }
+        if !needs_drop::<A::T>() { return; }
 
         // No need to be atomic because a dropped
         // AtomiQueue can have no references
@@ -43,11 +44,11 @@ impl<T> Drop for AtomiQueue<T> {
     }
 }
 
-impl<T> Default for AtomiQueue<T> {
+impl<A: Array> Default for AtomiQueue<A> {
     fn default() -> Self { AtomiQueue::new() }
 }
 
-impl<T> AtomiQueue<T> {
+impl<A: Array> AtomiQueue<A> {
     /// Creates a new, empty queue.
     pub const fn new() -> Self {
         AtomiQueue {
@@ -65,12 +66,12 @@ impl<T> AtomiQueue<T> {
     /// This operation will return `Err` if there's already a
     /// `push` happening somewhere else on the same queue, or the queue is
     /// full; `Err` also returns the failed value.
-    pub fn push(&self, value: T) -> Result<(), (PushError, T)> {
+    pub fn push(&self, value: A::T) -> Result<(), (PushError, A::T)> {
         if self.push_pending.compare_and_swap(false, true, Ordering::Acquire) {
             return Err((PushError::Pending, value));
         }
 
-        if self.size.load(Ordering::Acquire) == SIZE {
+        if self.size.load(Ordering::Acquire) == A::SIZE {
             self.push_pending.store(false, Ordering::Release);
             return Err((PushError::Full, value));
         }
@@ -90,7 +91,7 @@ impl<T> AtomiQueue<T> {
     /// This operation will return `Err` if there's already a
     /// [`front`](AtomiQueue::front), ['back'](AtomiQueue::back) or `pop` happening
     /// somewhere else on the same queue.
-    pub fn pop(&self) -> Result<Option<T>, ()> {
+    pub fn pop(&self) -> Result<Option<A::T>, ()> {
         if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
             return Err(());
         }
@@ -112,11 +113,11 @@ impl<T> AtomiQueue<T> {
 
     /// Clones the oldest value in the queue
     ///
-    /// This operation returns `Err` if there's already a 
+    /// This operation returns `Err` if there's already a
     /// `front`, [`back`](AtomiQueue::back), or [`pop`](AtomiQueue::pop)
     /// happening somewhere else on the same queue.
-    pub fn front(&self) -> Result<Option<T>, ()>
-    where T: Clone {
+    pub fn front(&self) -> Result<Option<A::T>, ()>
+    where A::T: Clone {
         if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
             return Err(());
         }
@@ -143,8 +144,8 @@ impl<T> AtomiQueue<T> {
     /// This operation returns `Err` if there's already a
     /// [`front`](AtomiQueue::front), `back`, or [`pop`](AtomiQueue::pop)
     /// happening somewhere else on the same queue.
-    pub fn back(&self) -> Result<Option<T>, ()>
-    where T: Clone {
+    pub fn back(&self) -> Result<Option<A::T>, ()>
+    where A::T: Clone {
         if self.pop_pending.compare_and_swap(false, true, Ordering::Acquire) {
             return Err(());
         }
@@ -156,7 +157,7 @@ impl<T> AtomiQueue<T> {
 
         let value = unsafe {
             if self.end.get() == 0 {
-                self.element_at(SIZE - 1).as_ref().unwrap()
+                self.element_at(A::SIZE - 1).as_ref().unwrap()
             } else {
                 self.element_at(self.end.get() - 1).as_ref().unwrap()
             }
@@ -167,19 +168,19 @@ impl<T> AtomiQueue<T> {
         Ok(Some(value))
     }
 
-    unsafe fn element_at(&self, index: usize) -> *mut T {
+    unsafe fn element_at(&self, index: usize) -> *mut A::T {
         let storage: *mut MaybeUninit<_> = self.storage.get();
         let storage: &mut MaybeUninit<_> = storage.as_mut().unwrap();
-        let elem_ptr = storage.as_mut_ptr() as *mut T;
+        let elem_ptr = storage.as_mut_ptr() as *mut A::T;
         elem_ptr.add(index)
     }
 
     fn inc_start(&self) {
-        self.start.update(|start| (start + 1) % SIZE);
+        self.start.update(|start| (start + 1) % A::SIZE);
     }
 
     fn inc_end(&self) {
-        self.end.update(|end| (end + 1) % SIZE);
+        self.end.update(|end| (end + 1) % A::SIZE);
     }
 
     /// Gets the number of elements currently in the queue.
@@ -201,8 +202,8 @@ impl<T> AtomiQueue<T> {
     /// backoff by sleeping, or realtime prioritization by filtering.
     pub fn extend(
         &self,
-        iter: impl IntoIterator<Item=T>,
-        mut retry: impl FnMut(PushError, T) -> Option<T>,
+        iter: impl IntoIterator<Item=A::T>,
+        mut retry: impl FnMut(PushError, A::T) -> Option<A::T>,
     ) {
         for value in iter {
             let mut maybe_value = Some(value);
@@ -222,7 +223,7 @@ mod tests {
 
     #[test]
     fn new() {
-        let queue = AtomiQueue::<i32>::new();
+        let queue = AtomiQueue::<[i32;16]>::new();
         assert_eq!(Ok(None), queue.pop());
         assert_eq!(Ok(()), queue.push(1));
         assert_eq!(Ok(Some(1)), queue.front());
@@ -232,7 +233,7 @@ mod tests {
 
     #[test]
     fn fill() {
-        let queue = AtomiQueue::<i32>::new();
+        let queue = AtomiQueue::<[i32;16]>::new();
         queue.extend((0..).take(SIZE), |_, _| None);
 
         assert_eq!(
@@ -257,7 +258,7 @@ mod tests {
 
     #[test]
     fn peeks() {
-        let queue = AtomiQueue::<i32>::new();
+        let queue = AtomiQueue::<[i32;16]>::new();
         assert_eq!(Ok(None), queue.pop());
         assert_eq!(Ok(()), queue.push(1));
         assert_eq!(Ok(Some(1)), queue.front());
